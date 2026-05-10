@@ -4,7 +4,7 @@ Set expirationTime on Google Drive permissions for a folder and every item insid
 
 Targets **reader** (view) and **writer** (edit) roles only; skips owner and other roles.
 
-Requires OAuth with scope https://www.googleapis.com/auth/drive
+OAuth: Drive scope always; Spreadsheets scope only when logging to a Sheet (--spreadsheet-id).
 """
 
 from __future__ import annotations
@@ -21,7 +21,22 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+LOG_HEADERS = [
+    "run_utc",
+    "root_folder_id",
+    "file_id",
+    "permission_id",
+    "grantee",
+    "grantee_type",
+    "role",
+    "previous_expiration",
+    "new_expiration",
+    "status",
+    "error_detail",
+]
 
 DEFAULT_FOLDER_ID = "1FmlgqUQwqYFzOOdXYaJZvBWYDP7sD1Ve"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -49,20 +64,38 @@ def _oauth_client_config_from_env() -> dict | None:
     }
 
 
-def get_credentials() -> Credentials:
+def _required_scopes(with_sheets_log: bool) -> list[str]:
+    scopes = [DRIVE_SCOPE]
+    if with_sheets_log:
+        scopes.append(SHEETS_SCOPE)
+    return scopes
+
+
+def _needs_sheets_reauth(creds: Credentials, with_sheets_log: bool) -> bool:
+    if not with_sheets_log:
+        return False
+    have = set(creds.scopes or [])
+    return SHEETS_SCOPE not in have
+
+
+def get_credentials(with_sheets_log: bool) -> Credentials:
+    scopes = _required_scopes(with_sheets_log)
     creds: Credentials | None = None
     if os.path.isfile(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, scopes)
 
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
 
+    if creds and _needs_sheets_reauth(creds, with_sheets_log):
+        creds = None
+
     if not creds or not creds.valid:
         client_config = _oauth_client_config_from_env()
         if client_config:
-            flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+            flow = InstalledAppFlow.from_client_config(client_config, scopes)
         elif os.path.isfile(CLIENT_SECRET_FILE):
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, scopes)
         else:
             print(
                 "Missing OAuth config. Add credentials/client_secret.json or set "
@@ -82,6 +115,49 @@ def rfc3339_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _sheet_cell(value: object) -> str:
+    """Avoid Sheets treating values as formulas."""
+    s = "" if value is None else str(value)
+    if s and s[0] in "=+-@":
+        return "'" + s
+    return s
+
+
+def sheet_ensure_headers(sheets, spreadsheet_id: str, sheet_tab: str) -> None:
+    rng = f"{sheet_tab}!A1:A1"
+    existing = (
+        sheets.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=rng)
+        .execute()
+    )
+    if existing.get("values"):
+        return
+    sheets.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{sheet_tab}!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [LOG_HEADERS]},
+    ).execute()
+
+
+def sheet_append_rows(
+    sheets, spreadsheet_id: str, sheet_tab: str, rows: list[list[object]]
+) -> None:
+    if not rows:
+        return
+    chunk_size = 500
+    for i in range(0, len(rows), chunk_size):
+        chunk = [[_sheet_cell(v) for v in row] for row in rows[i : i + chunk_size]]
+        sheets.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_tab}!A:K",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": chunk},
+        ).execute()
 
 
 def iter_folder_tree_file_ids(service, root_folder_id: str):
@@ -145,8 +221,11 @@ def process_file_permissions(
     file_id: str,
     expire_str: str,
     *,
+    root_folder_id: str,
+    run_utc: str,
     include_link: bool,
     dry_run: bool,
+    log_rows: list[list[object]] | None,
 ) -> tuple[int, int, int]:
     """Returns (updated_count, skipped_count, permissions_listed)."""
     permission_items = list_permissions_for_file(service, file_id)
@@ -171,7 +250,30 @@ def process_file_permissions(
 
         label = f"{file_id[:8]}… {ptype}:{perm.get('emailAddress') or perm.get('domain') or pid}"
 
-        current_exp = perm.get("expirationTime")
+        current_exp = perm.get("expirationTime") or ""
+        grantee = perm.get("emailAddress") or perm.get("domain") or ""
+        if ptype == "anyone" and not grantee:
+            grantee = "anyoneWithLink"
+
+        def append_log(status: str, error_detail: str = "") -> None:
+            if log_rows is None or dry_run:
+                return
+            log_rows.append(
+                [
+                    run_utc,
+                    root_folder_id,
+                    file_id,
+                    pid or "",
+                    grantee,
+                    ptype or "",
+                    role,
+                    current_exp,
+                    expire_str,
+                    status,
+                    error_detail[:500] if error_detail else "",
+                ]
+            )
+
         if dry_run:
             print(f"[dry-run] {label} ({role}) -> {expire_str} (was {current_exp})")
             updated += 1
@@ -187,8 +289,11 @@ def process_file_permissions(
             ).execute()
             print(f"OK {label} ({role}) -> expires {expire_str}")
             updated += 1
+            append_log("ok")
         except HttpError as e:
+            err = str(e)
             print(f"FAIL {label} ({role}): {e}", file=sys.stderr)
+            append_log("fail", err)
 
     return updated, skipped, len(permission_items)
 
@@ -225,6 +330,16 @@ def main() -> None:
         help="Sleep this many seconds after each file's permission updates (quota safety)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print planned updates only; no API writes")
+    parser.add_argument(
+        "--spreadsheet-id",
+        default=(os.environ.get("SPREADSHEET_ID") or "").strip() or None,
+        help="Google Sheet ID (from the URL); enables audit log tab. Or set SPREADSHEET_ID.",
+    )
+    parser.add_argument(
+        "--sheet-tab",
+        default=os.environ.get("SHEET_TAB", "Sheet1"),
+        help="Worksheet tab name (default Sheet1 or SHEET_TAB)",
+    )
     args = parser.parse_args()
 
     if args.hours <= 0:
@@ -233,9 +348,14 @@ def main() -> None:
 
     expire_at = datetime.now(timezone.utc) + timedelta(hours=args.hours)
     expire_str = rfc3339_utc(expire_at)
+    run_utc = rfc3339_utc(datetime.now(timezone.utc))
 
-    creds = get_credentials()
+    use_sheet = bool(args.spreadsheet_id) and not args.dry_run
+    creds = get_credentials(with_sheets_log=use_sheet)
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    sheets_svc = None
+    if use_sheet:
+        sheets_svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     if args.root_only:
         file_ids = [args.folder_id]
@@ -245,8 +365,11 @@ def main() -> None:
     total_updated = 0
     total_skipped = 0
     total_perms = 0
+    log_rows: list[list[object]] | None = [] if use_sheet else None
 
     print(f"Processing {len(file_ids)} item(s); roles={sorted(ROLES_TO_EXPIRE)}; expires {expire_str}", flush=True)
+    if use_sheet:
+        print(f"Sheet log: {args.sheet_tab!r} in spreadsheet {args.spreadsheet_id}", flush=True)
 
     for i, fid in enumerate(file_ids, start=1):
         if len(file_ids) > 1 and i % 50 == 1:
@@ -255,14 +378,33 @@ def main() -> None:
             service,
             fid,
             expire_str,
+            root_folder_id=args.folder_id,
+            run_utc=run_utc,
             include_link=args.include_link,
             dry_run=args.dry_run,
+            log_rows=log_rows,
         )
         total_updated += u
         total_skipped += s
         total_perms += n
         if args.throttle_seconds > 0:
             time.sleep(args.throttle_seconds)
+
+    if use_sheet and sheets_svc and log_rows is not None:
+        try:
+            sheet_ensure_headers(sheets_svc, args.spreadsheet_id, args.sheet_tab)
+            sheet_append_rows(sheets_svc, args.spreadsheet_id, args.sheet_tab, log_rows)
+            print(
+                f"Appended {len(log_rows)} row(s) to "
+                f"https://docs.google.com/spreadsheets/d/{args.spreadsheet_id}/edit",
+                flush=True,
+            )
+        except HttpError as e:
+            print(
+                f"Sheet logging failed ({e}). Enable Google Sheets API for your Cloud project, "
+                f"share the spreadsheet with the same Google account as Drive, and re-run.",
+                file=sys.stderr,
+            )
 
     print(
         f"Done. Items: {len(file_ids)}; permission rows seen: {total_perms}; "
