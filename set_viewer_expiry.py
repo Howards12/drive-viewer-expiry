@@ -713,10 +713,11 @@ def process_file_permissions(
             continue
 
         try:
+            api_role = perm.get("role") or role
             service.permissions().update(
                 fileId=file_id,
                 permissionId=pid,
-                body={"expirationTime": expire_str},
+                body={"expirationTime": expire_str, "role": api_role},
                 supportsAllDrives=True,
                 removeExpiration=False,
             ).execute()
