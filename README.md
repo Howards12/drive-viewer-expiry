@@ -89,6 +89,8 @@ Or: `python set_viewer_expiry.py --spreadsheet-id YOUR_ID --sheet-tab Audit`
 
 On first use, the script writes a header row if cell `A1` is empty. Columns include: run time (UTC), root folder id, file id, permission id, grantee, type, role, previous expiration, **new expiration**, status, and error text for failures.
 
+To refresh human-readable headers and header styling on an **existing** sheet (e.g. after an older run used snake_case titles), run: `python set_viewer_expiry.py --format-sheet` (uses `SPREADSHEET_ID`, saved id, or `--spreadsheet-id`; optional `--sheet-tab`).
+
 **Note:** This log records **expiry changes the script made**, not who opened or viewed files in Drive (that requires Workspace admin reports or other tooling).
 
 ## Behaviour notes

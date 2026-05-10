@@ -24,19 +24,35 @@ from googleapiclient.errors import HttpError
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
-LOG_HEADERS = [
-    "run_utc",
-    "root_folder_id",
-    "file_id",
-    "permission_id",
-    "grantee",
-    "grantee_type",
-    "role",
-    "previous_expiration",
-    "new_expiration",
-    "status",
-    "error_detail",
+# Display row written to row 1 (A1:K1). Column order matches append_log / sheet_append_rows.
+# Internal keys (for reference): run_utc, root_folder_id, file_id, permission_id, grantee,
+# grantee_type, role, previous_expiration, new_expiration, status, error_detail.
+SHEET_HEADER_ROW = [
+    "Run (UTC)",
+    "Root folder ID",
+    "File ID",
+    "Permission ID",
+    "Grantee",
+    "Grantee type",
+    "Role",
+    "Previous expiration",
+    "New expiration",
+    "Status",
+    "Error detail",
 ]
+
+SHEET_LOG_NUM_COLUMNS = len(SHEET_HEADER_ROW)
+
+
+def _sheet_append_range(sheet_tab: str) -> str:
+    """Range like 'Tab!A:K' covering all log columns."""
+    n = SHEET_LOG_NUM_COLUMNS
+    end = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        end = chr(65 + r) + end
+    return f"{sheet_tab}!A:{end}"
+
 
 DEFAULT_FOLDER_ID = "1FmlgqUQwqYFzOOdXYaJZvBWYDP7sD1Ve"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -127,7 +143,92 @@ def _sheet_cell(value: object) -> str:
     return s
 
 
-def sheet_ensure_headers(sheets, spreadsheet_id: str, sheet_tab: str) -> None:
+def _sheet_id_for_title(sheets_svc, spreadsheet_id: str, sheet_tab: str) -> int:
+    meta = (
+        sheets_svc.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute()
+    )
+    for sh in meta.get("sheets") or []:
+        props = sh.get("properties") or {}
+        if props.get("title") == sheet_tab:
+            return int(props["sheetId"])
+    raise ValueError(f"No sheet tab named {sheet_tab!r} in spreadsheet {spreadsheet_id}")
+
+
+def format_audit_sheet_header(sheets_svc, spreadsheet_id: str, sheet_tab: str) -> None:
+    """Bold header row, light header background, freeze row 1, set column widths."""
+    sheet_id = _sheet_id_for_title(sheets_svc, spreadsheet_id, sheet_tab)
+    end_col = SHEET_LOG_NUM_COLUMNS  # exclusive endColumnIndex
+    # Light blue-gray header fill (professional, readable on screen).
+    header_bg = {"red": 0.86, "green": 0.90, "blue": 0.94}
+    width_by_col = [
+        150,  # Run (UTC)
+        200,  # Root folder ID
+        220,  # File ID
+        200,  # Permission ID
+        180,  # Grantee
+        110,  # Grantee type
+        90,  # Role
+        170,  # Previous expiration
+        170,  # New expiration
+        85,  # Status
+        300,  # Error detail
+    ]
+    requests: list[dict] = [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": end_col,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": header_bg,
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "LEFT",
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+    ]
+    for i, px in enumerate(width_by_col):
+        requests.append(
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": i,
+                        "endIndex": i + 1,
+                    },
+                    "properties": {"pixelSize": px},
+                    "fields": "pixelSize",
+                }
+            }
+        )
+    sheets_svc.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id, body={"requests": requests}
+    ).execute()
+
+
+def sheet_ensure_headers(sheets, spreadsheet_id: str, sheet_tab: str) -> bool:
     rng = f"{sheet_tab}!A1:A1"
     existing = (
         sheets.spreadsheets()
@@ -136,13 +237,14 @@ def sheet_ensure_headers(sheets, spreadsheet_id: str, sheet_tab: str) -> None:
         .execute()
     )
     if existing.get("values"):
-        return
+        return False
     sheets.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
         range=f"{sheet_tab}!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": [LOG_HEADERS]},
+        body={"values": [SHEET_HEADER_ROW]},
     ).execute()
+    return True
 
 
 def load_saved_spreadsheet_id() -> str | None:
@@ -179,8 +281,9 @@ def create_audit_spreadsheet(sheets, *, title: str, sheet_tab: str) -> str:
         spreadsheetId=sid,
         range=f"{sheet_tab}!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": [LOG_HEADERS]},
+        body={"values": [SHEET_HEADER_ROW]},
     ).execute()
+    format_audit_sheet_header(sheets, sid, sheet_tab)
     return sid
 
 
@@ -194,7 +297,7 @@ def sheet_append_rows(
         chunk = [[_sheet_cell(v) for v in row] for row in rows[i : i + chunk_size]]
         sheets.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range=f"{sheet_tab}!A:K",
+            range=_sheet_append_range(sheet_tab),
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": chunk},
@@ -339,6 +442,35 @@ def process_file_permissions(
     return updated, skipped, len(permission_items)
 
 
+def cmd_format_audit_sheet_header(args: argparse.Namespace) -> None:
+    """Update A1:K1 with display headers and apply professional header formatting."""
+    args.spreadsheet_id = resolve_spreadsheet_id(args.spreadsheet_id)
+    if not args.spreadsheet_id:
+        print(
+            "No spreadsheet id: use --spreadsheet-id, set SPREADSHEET_ID, or save an id via --create-audit-sheet.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    creds = get_credentials(with_sheets_log=True)
+    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    try:
+        sheets.spreadsheets().values().update(
+            spreadsheetId=args.spreadsheet_id,
+            range=f"{args.sheet_tab}!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [SHEET_HEADER_ROW]},
+        ).execute()
+        format_audit_sheet_header(sheets, args.spreadsheet_id, args.sheet_tab)
+    except HttpError as e:
+        print(
+            f"Could not format sheet ({e}). Check Sheets API access, tab name --sheet-tab, and sharing.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from e
+    url = f"https://docs.google.com/spreadsheets/d/{args.spreadsheet_id}/edit"
+    print(f"Audit sheet header updated: {url}", flush=True)
+
+
 def cmd_create_audit_sheet(args: argparse.Namespace) -> None:
     """Create a log spreadsheet in the signed-in user's Drive; save ID for later runs."""
     creds = get_credentials(with_sheets_log=True)
@@ -421,11 +553,20 @@ def main() -> None:
         action="store_true",
         help="With --create-audit-sheet, do not write credentials/audit_spreadsheet_id.txt",
     )
+    parser.add_argument(
+        "--format-sheet",
+        action="store_true",
+        help="Rewrite row 1 as human-readable headers and apply header formatting (freeze, widths); no expiry run.",
+    )
     args = parser.parse_args()
 
     if args.create_audit_sheet:
         args.save_audit_id = not args.no_save_audit_id
         cmd_create_audit_sheet(args)
+        return
+
+    if args.format_sheet:
+        cmd_format_audit_sheet_header(args)
         return
 
     args.spreadsheet_id = resolve_spreadsheet_id(args.spreadsheet_id)
@@ -480,7 +621,10 @@ def main() -> None:
 
     if use_sheet and sheets_svc and log_rows is not None:
         try:
-            sheet_ensure_headers(sheets_svc, args.spreadsheet_id, args.sheet_tab)
+            if sheet_ensure_headers(sheets_svc, args.spreadsheet_id, args.sheet_tab):
+                format_audit_sheet_header(
+                    sheets_svc, args.spreadsheet_id, args.sheet_tab
+                )
             sheet_append_rows(sheets_svc, args.spreadsheet_id, args.sheet_tab, log_rows)
             print(
                 f"Appended {len(log_rows)} row(s) to "
