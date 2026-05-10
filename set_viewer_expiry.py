@@ -44,8 +44,10 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), "credentials")
 CLIENT_SECRET_FILE = os.path.join(CREDENTIALS_DIR, "client_secret.json")
 TOKEN_FILE = os.path.join(CREDENTIALS_DIR, "token.json")
+AUDIT_SPREADSHEET_ID_FILE = os.path.join(CREDENTIALS_DIR, "audit_spreadsheet_id.txt")
 
 ROLES_TO_EXPIRE = frozenset({"reader", "writer"})
+DEFAULT_AUDIT_SHEET_TITLE = "Drive permission expiry log"
 
 
 def _oauth_client_config_from_env() -> dict | None:
@@ -141,6 +143,45 @@ def sheet_ensure_headers(sheets, spreadsheet_id: str, sheet_tab: str) -> None:
         valueInputOption="USER_ENTERED",
         body={"values": [LOG_HEADERS]},
     ).execute()
+
+
+def load_saved_spreadsheet_id() -> str | None:
+    if not os.path.isfile(AUDIT_SPREADSHEET_ID_FILE):
+        return None
+    with open(AUDIT_SPREADSHEET_ID_FILE, encoding="utf-8") as f:
+        return (f.read() or "").strip() or None
+
+
+def save_audit_spreadsheet_id(spreadsheet_id: str) -> None:
+    os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+    with open(AUDIT_SPREADSHEET_ID_FILE, "w", encoding="utf-8") as f:
+        f.write(spreadsheet_id.strip() + "\n")
+
+
+def resolve_spreadsheet_id(cli_value: str | None) -> str | None:
+    if cli_value and str(cli_value).strip():
+        return str(cli_value).strip()
+    env_id = (os.environ.get("SPREADSHEET_ID") or "").strip()
+    if env_id:
+        return env_id
+    return load_saved_spreadsheet_id()
+
+
+def create_audit_spreadsheet(sheets, *, title: str, sheet_tab: str) -> str:
+    """Create a new spreadsheet with one tab and header row; return spreadsheetId."""
+    body = {
+        "properties": {"title": title},
+        "sheets": [{"properties": {"title": sheet_tab}}],
+    }
+    created = sheets.spreadsheets().create(body=body, fields="spreadsheetId").execute()
+    sid = created["spreadsheetId"]
+    sheets.spreadsheets().values().update(
+        spreadsheetId=sid,
+        range=f"{sheet_tab}!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [LOG_HEADERS]},
+    ).execute()
+    return sid
 
 
 def sheet_append_rows(
@@ -298,6 +339,31 @@ def process_file_permissions(
     return updated, skipped, len(permission_items)
 
 
+def cmd_create_audit_sheet(args: argparse.Namespace) -> None:
+    """Create a log spreadsheet in the signed-in user's Drive; save ID for later runs."""
+    creds = get_credentials(with_sheets_log=True)
+    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    try:
+        sid = create_audit_spreadsheet(
+            sheets,
+            title=args.audit_sheet_title,
+            sheet_tab=args.sheet_tab,
+        )
+    except HttpError as e:
+        print(
+            f"Could not create spreadsheet ({e}). Enable Google Sheets API on your Cloud project "
+            f"and ensure OAuth includes the Sheets scope (delete credentials/token.json if you added Sheets later).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from e
+    if args.save_audit_id:
+        save_audit_spreadsheet_id(sid)
+        print(f"Saved spreadsheet id to {AUDIT_SPREADSHEET_ID_FILE}", flush=True)
+    url = f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+    print(f"Created audit sheet: {url}", flush=True)
+    print(f"Export for scripts: export SPREADSHEET_ID={sid}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Expire reader and writer permissions on a folder and all items inside it."
@@ -332,15 +398,37 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print planned updates only; no API writes")
     parser.add_argument(
         "--spreadsheet-id",
-        default=(os.environ.get("SPREADSHEET_ID") or "").strip() or None,
-        help="Google Sheet ID (from the URL); enables audit log tab. Or set SPREADSHEET_ID.",
+        default=None,
+        help="Google Sheet ID (from the URL); or set SPREADSHEET_ID; or use saved id from --create-audit-sheet.",
     )
     parser.add_argument(
         "--sheet-tab",
         default=os.environ.get("SHEET_TAB", "Sheet1"),
         help="Worksheet tab name (default Sheet1 or SHEET_TAB)",
     )
+    parser.add_argument(
+        "--create-audit-sheet",
+        action="store_true",
+        help="Create a new Google Sheet for logs in your Drive, write headers, save its id locally (no expiry run).",
+    )
+    parser.add_argument(
+        "--audit-sheet-title",
+        default=os.environ.get("AUDIT_SHEET_TITLE", DEFAULT_AUDIT_SHEET_TITLE),
+        help="Title for the spreadsheet created by --create-audit-sheet",
+    )
+    parser.add_argument(
+        "--no-save-audit-id",
+        action="store_true",
+        help="With --create-audit-sheet, do not write credentials/audit_spreadsheet_id.txt",
+    )
     args = parser.parse_args()
+
+    if args.create_audit_sheet:
+        args.save_audit_id = not args.no_save_audit_id
+        cmd_create_audit_sheet(args)
+        return
+
+    args.spreadsheet_id = resolve_spreadsheet_id(args.spreadsheet_id)
 
     if args.hours <= 0:
         print("--hours must be positive", file=sys.stderr)

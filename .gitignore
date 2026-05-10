@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 credentials/client_secret.json
 credentials/token.json
+credentials/audit_spreadsheet_id.txt
 .env

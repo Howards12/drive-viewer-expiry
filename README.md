@@ -24,7 +24,12 @@ This tool sets **`expirationTime`** on **reader** (view) and **writer** (edit) p
    ```
 
 4. First run opens a browser; tokens are stored in `credentials/token.json`.
-5. **Optional audit Sheet:** Create a new Google Sheet, copy its ID from the URL (`https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`). Share the Sheet with the **same Google account** that runs the script (Editor access). If you add logging after an earlier run, delete `credentials/token.json` once so OAuth can include the Sheets scope.
+5. **Audit Sheet (pick one):**
+   - **Easiest:** after credentials exist, run **`python set_viewer_expiry.py --create-audit-sheet`** on your computer. That opens a browser, creates a titled spreadsheet in **your** Google Drive, writes the column headers, and saves the id to `credentials/audit_spreadsheet_id.txt` (gitignored). Later runs pick up that id automatically.
+   - **Manual:** create a blank Sheet yourself, copy its id from the URL, set `SPREADSHEET_ID`, and share the Sheet with the same account that runs the script if needed.
+   - If you already ran the tool **without** Sheets, delete `credentials/token.json` once before `--create-audit-sheet` so OAuth can add the Sheets scope.
+
+**I (or any remote assistant) cannot log into your Google or Cloud Console for you** — enabling APIs, placing `client_secret.json`, and completing the browser consent step has to happen on your side. The `--create-audit-sheet` step only needs that one-time setup, then it finishes Sheet creation for you.
 
 ## Usage
 
@@ -63,9 +68,20 @@ python set_viewer_expiry.py --dry-run
 
 Each successful run can **append one row per permission change** (status `ok` or `fail`) to a tab you choose (default `Sheet1`). **Where to view:** open that spreadsheet in the browser; new rows appear at the bottom after each run.
 
+If you used **`--create-audit-sheet`**, you normally **do not** need `SPREADSHEET_ID`; the saved id is read automatically.
+
+```bash
+# One-time: create Sheet + save id (after OAuth / client_secret are in place)
+python set_viewer_expiry.py --create-audit-sheet
+
+# Routine runs (uses saved spreadsheet id if present)
+python set_viewer_expiry.py
+```
+
+Or set explicitly:
+
 ```bash
 export SPREADSHEET_ID=your_sheet_id_from_the_url
-# optional: export SHEET_TAB=Audit
 python set_viewer_expiry.py
 ```
 
