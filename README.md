@@ -7,7 +7,7 @@ This tool sets **`expirationTime`** on **reader** (view) and **writer** (edit) p
 ## Requirements
 
 - A Google account where the Drive API allows **`expirationTime`** on permissions (often **Google Workspace**; consumer accounts may reject some updates).
-- A **Google Cloud** project with **Google Drive API** and **Google Sheets API** enabled (Sheets only if you use logging below).
+- A **Google Cloud** project with **Google Drive API** and **Google Sheets API** enabled (Sheets only if you use logging below). For **access activity** logging, also enable **Google Drive Activity API** (`driveactivity.googleapis.com`) and add the OAuth scope **`https://www.googleapis.com/auth/drive.activity.readonly`** to your app (same as in code).
 - **OAuth 2.0 Desktop app** credentials (`credentials/client_secret.json` or env vars).
 
 ## Setup
@@ -28,6 +28,7 @@ This tool sets **`expirationTime`** on **reader** (view) and **writer** (edit) p
    - **Easiest:** after credentials exist, run **`python set_viewer_expiry.py --create-audit-sheet`** on your computer. That opens a browser, creates a titled spreadsheet in **your** Google Drive, writes the column headers, and saves the id to `credentials/audit_spreadsheet_id.txt` (gitignored). Later runs pick up that id automatically.
    - **Manual:** create a blank Sheet yourself, copy its id from the URL, set `SPREADSHEET_ID`, and share the Sheet with the same account that runs the script if needed.
    - If you already ran the tool **without** Sheets, delete `credentials/token.json` once before `--create-audit-sheet` so OAuth can add the Sheets scope.
+   - If you add **Drive Activity** (access log) after an earlier auth, delete `credentials/token.json` once so OAuth can add `drive.activity.readonly`.
 
 **I (or any remote assistant) cannot log into your Google or Cloud Console for you** — enabling APIs, placing `client_secret.json`, and completing the browser consent step has to happen on your side. The `--create-audit-sheet` step only needs that one-time setup, then it finishes Sheet creation for you.
 
@@ -66,7 +67,14 @@ python set_viewer_expiry.py --dry-run
 
 ### Daily log in Google Sheets
 
-Each successful run can **append one row per permission change** (status `ok` or `fail`) to a tab you choose (default `Sheet1`). **Where to view:** open that spreadsheet in the browser; new rows appear at the bottom after each run.
+The spreadsheet can hold **two kinds of logs** (separate tabs):
+
+1. **Permission expiry log** (default tab `Sheet1` or `SHEET_TAB` / `--sheet-tab`) — one row per **permission expiry change** this script applied (who was granted what role, previous/new expiration, status). This is **not** a full audit of every Drive event.
+2. **Access activity log** (default tab **`Access log`**, or `ACTIVITY_SHEET_TAB` / `--activity-tab`) — rows from the **Google Drive Activity API v2** for the same `--folder-id` tree: edits, moves, renames, permission changes, etc., over a time window you choose.
+
+**Drive Activity API availability:** The API is documented under **Google Workspace** Drive. **Consumer (personal Gmail) accounts** may return no or limited activity depending on Google’s policies and activity history settings—**test with the account and folder you care about**. If calls fail with 403 or empty results, confirm the API is enabled, the OAuth scope is granted, and the signed-in user can see activity for that content.
+
+Each successful expiry run can **append** to the expiry tab. Access events are appended only when you run **`--sync-access-activity`** or **`--also-log-access`** (see below).
 
 If you used **`--create-audit-sheet`**, you normally **do not** need `SPREADSHEET_ID`; the saved id is read automatically.
 
@@ -87,13 +95,33 @@ python set_viewer_expiry.py
 
 Or: `python set_viewer_expiry.py --spreadsheet-id YOUR_ID --sheet-tab Audit`
 
-On first use, the script writes a header row if cell `A1` is empty. Log columns include: run time (UTC), root folder id, **root folder name**, file id, **file name**, permission id, grantee, type, role, previous expiration, **new expiration**, status, and error detail.
+On first use, the script writes a header row if cell `A1` is empty on that tab. **Expiry tab** columns: run time (UTC), root folder id, **root folder name**, file id, **file name**, permission id, grantee, type, role, previous expiration, **new expiration**, status, and error detail.
 
-`--create-audit-sheet` sets the **spreadsheet document title** to `AUDIT_SHEET_TITLE — <root folder name>` (root folder comes from `FOLDER_ID` / `--folder-id`).
+**Access activity tab** columns (Title Case): Time (UTC), Actor, Action, Target type, Item ID, Item name, Root folder ID, Root folder name, Detail. The first time that tab is used, the script **creates the tab** if needed, writes headers when `A1` is empty, then appends rows (same styling pattern as the expiry tab: bold header, freeze, widths).
 
-After upgrading column layout, run `python set_viewer_expiry.py --format-sheet` to rewrite row 1 and column widths (uses `SPREADSHEET_ID`, saved id, or `--spreadsheet-id`; optional `--sheet-tab`).
+`--create-audit-sheet` sets the **spreadsheet document title** to `AUDIT_SHEET_TITLE — <root folder name>` (root folder comes from `FOLDER_ID` / `--folder-id`). It does not add the access tab until you run an access sync.
 
-**Note:** This log records **expiry changes the script made**, not who opened or viewed files in Drive (that requires Workspace admin reports or other tooling).
+After upgrading column layout, run `python set_viewer_expiry.py --format-sheet` to rewrite row 1 and column widths for the **expiry** tab only (uses `SPREADSHEET_ID`, saved id, or `--spreadsheet-id`; optional `--sheet-tab`).
+
+#### Sync access activity only (e.g. daily cron)
+
+Query Drive Activity under `ancestorName = items/<FOLDER_ID>` with `time >=` (now − hours), paginate, and append to the access tab—**no** permission expiry updates:
+
+```bash
+python set_viewer_expiry.py --sync-access-activity --folder-id "$FOLDER_ID"
+```
+
+Optional: `--activity-hours 24` (default **24**, float allowed), `--activity-tab "Access log"` (or env `ACTIVITY_SHEET_TAB`), same spreadsheet resolution as expiry (`SPREADSHEET_ID` / saved id / `--spreadsheet-id`).
+
+#### Run expiry and then access log in one invocation
+
+```bash
+python set_viewer_expiry.py --also-log-access
+```
+
+Uses `--activity-hours` (default 24) and `--activity-tab` for the second append. Requires a spreadsheet id (not compatible with `--dry-run`).
+
+**Note:** **Expiration timestamps** you set with this tool appear on the **expiry** tab. **Drive Activity** events (open/edit/move/share, etc.) appear on the **access** tab. They are not merged automatically; combine in Sheets manually if you need one view.
 
 ## Behaviour notes
 
