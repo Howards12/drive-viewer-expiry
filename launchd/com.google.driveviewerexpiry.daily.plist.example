@@ -25,5 +25,19 @@
 	<false/>
 	<key>KeepAlive</key>
 	<false/>
+	<!--
+	Optional: set folder + sheet for scheduled runs (uncomment and edit):
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>FOLDER_ID</key>
+		<string>your_drive_folder_id</string>
+		<key>SPREADSHEET_ID</key>
+		<string>your_sheet_id</string>
+		<key>EXPIRY_HOURS</key>
+		<string>24</string>
+		<key>ACTIVITY_HOURS</key>
+		<string>24</string>
+	</dict>
+	-->
 </dict>
 </plist>

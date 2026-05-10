@@ -125,11 +125,13 @@ Uses `--activity-hours` (default 24) and `--activity-tab` for the second append.
 
 ## Automatic daily updates (no manual run)
 
-You can run **`scripts/run-daily-audit.sh`** on a schedule so **`--sync-access-activity`** runs without opening a terminal. The script uses **`set -euo pipefail`**, resolves the repo root, prefers **`.venv/bin/python`** when present, and forwards **`SPREADSHEET_ID`**, **`SHEET_TAB`**, **`ACTIVITY_SHEET_TAB`**, **`ACTIVITY_HOURS`**, and **`FOLDER_ID`** when they are already set in the environment.
+You can run **`scripts/run-daily-audit.sh`** on a schedule so **`--also-log-access`** runs without opening a terminal. That **re-applies** reader/writer expiries for the tree (using **`EXPIRY_HOURS`**, default 24), **appends rows to the expiry tab**, then **appends access activity** to **`ACTIVITY_SHEET_TAB`**. The script uses **`set -euo pipefail`**, resolves the repo root, prefers **`.venv/bin/python`** when present, and forwards **`SPREADSHEET_ID`**, **`SHEET_TAB`**, **`ACTIVITY_SHEET_TAB`**, **`ACTIVITY_HOURS`**, **`EXPIRY_HOURS`**, and **`FOLDER_ID`** when set in the environment.
 
-**Credentials:** `credentials/token.json` must exist on the machine that runs the job and stay valid (refresh tokens). The **first** OAuth browser consent is still **manual** on that machine; scheduled runs only work after that.
+**Rolling window:** a **daily** expiry run sets **`expirationTime` = now + `EXPIRY_HOURS` again**, so access **keeps getting extended** while the job runs. To let permissions actually lapse, **stop** the daily expiry job or run expiry **once** manually.
 
-**Optional fuller daily job:** To run **permission expiry updates** and append **access activity** in one step, uncomment the second command in `scripts/run-daily-audit.sh` (`--also-log-access`) and comment out or remove the `--sync-access-activity` line, or run both lines if you truly want two passes (usually one line is enough).
+**Credentials:** `credentials/token.json` must exist on the machine that runs the job and stay valid (refresh tokens). The **first** OAuth browser consent is still **manual** on that machine; scheduled runs only work after that. You need scopes for **Drive**, **Sheets**, and **Drive Activity** (see `--sync-access-activity` / delete `token.json` after enabling APIs).
+
+**Access-only:** In `scripts/run-daily-audit.sh`, swap the active line to **`--sync-access-activity`** if you only want the access tab (no expiry tab updates).
 
 ### macOS (`launchd`)
 
