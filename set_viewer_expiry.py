@@ -24,13 +24,15 @@ from googleapiclient.errors import HttpError
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
-# Display row written to row 1 (A1:K1). Column order matches append_log / sheet_append_rows.
-# Internal keys (for reference): run_utc, root_folder_id, file_id, permission_id, grantee,
-# grantee_type, role, previous_expiration, new_expiration, status, error_detail.
+# Display row written to row 1. Column order matches append_log / sheet_append_rows.
+# Internal keys (for reference): run_utc, root_folder_id, root_folder_name, file_id, file_name,
+# permission_id, grantee, grantee_type, role, previous_expiration, new_expiration, status, error_detail.
 SHEET_HEADER_ROW = [
     "Run (UTC)",
     "Root folder ID",
+    "Root folder name",
     "File ID",
+    "File name",
     "Permission ID",
     "Grantee",
     "Grantee type",
@@ -168,7 +170,9 @@ def format_audit_sheet_header(sheets_svc, spreadsheet_id: str, sheet_tab: str) -
     width_by_col = [
         150,  # Run (UTC)
         200,  # Root folder ID
+        200,  # Root folder name
         220,  # File ID
+        220,  # File name
         200,  # Permission ID
         180,  # Grantee
         110,  # Grantee type
@@ -304,9 +308,22 @@ def sheet_append_rows(
         ).execute()
 
 
-def iter_folder_tree_file_ids(service, root_folder_id: str):
-    """Yield the root folder id, then every descendant file and subfolder id."""
-    yield root_folder_id
+def iter_folder_tree_with_names(
+    service, root_folder_id: str
+):
+    """Yield (file_id, item_name, root_folder_name) for the root, then every descendant."""
+    root = (
+        service.files()
+        .get(
+            fileId=root_folder_id,
+            fields="id,name",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    root_name = root.get("name", "")
+    yield root_folder_id, root_name, root_name
+
     stack = [root_folder_id]
     while stack:
         parent_id = stack.pop()
@@ -331,7 +348,8 @@ def iter_folder_tree_file_ids(service, root_folder_id: str):
                 break
             for f in resp.get("files") or []:
                 fid = f["id"]
-                yield fid
+                item_name = f.get("name", "")
+                yield fid, item_name, root_name
                 if f.get("mimeType") == FOLDER_MIME:
                     stack.append(fid)
             page_token = resp.get("nextPageToken")
@@ -366,6 +384,8 @@ def process_file_permissions(
     expire_str: str,
     *,
     root_folder_id: str,
+    root_folder_name: str,
+    file_name: str,
     run_utc: str,
     include_link: bool,
     dry_run: bool,
@@ -406,7 +426,9 @@ def process_file_permissions(
                 [
                     run_utc,
                     root_folder_id,
+                    root_folder_name,
                     file_id,
+                    file_name,
                     pid or "",
                     grantee,
                     ptype or "",
@@ -443,7 +465,7 @@ def process_file_permissions(
 
 
 def cmd_format_audit_sheet_header(args: argparse.Namespace) -> None:
-    """Update A1:K1 with display headers and apply professional header formatting."""
+    """Update row 1 with display headers and apply professional header formatting."""
     args.spreadsheet_id = resolve_spreadsheet_id(args.spreadsheet_id)
     if not args.spreadsheet_id:
         print(
@@ -471,14 +493,29 @@ def cmd_format_audit_sheet_header(args: argparse.Namespace) -> None:
     print(f"Audit sheet header updated: {url}", flush=True)
 
 
+def _drive_folder_display_title(service, folder_id: str, fallback: str) -> str:
+    try:
+        meta = (
+            service.files()
+            .get(fileId=folder_id, fields="name", supportsAllDrives=True)
+            .execute()
+        )
+        return (meta.get("name") or "").strip() or fallback
+    except HttpError:
+        return fallback
+
+
 def cmd_create_audit_sheet(args: argparse.Namespace) -> None:
     """Create a log spreadsheet in the signed-in user's Drive; save ID for later runs."""
     creds = get_credentials(with_sheets_log=True)
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+    folder_title = _drive_folder_display_title(drive, args.folder_id, args.folder_id)
+    doc_title = f"{args.audit_sheet_title} — {folder_title}"
     sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
     try:
         sid = create_audit_spreadsheet(
             sheets,
-            title=args.audit_sheet_title,
+            title=doc_title,
             sheet_tab=args.sheet_tab,
         )
     except HttpError as e:
@@ -562,6 +599,7 @@ def main() -> None:
 
     if args.create_audit_sheet:
         args.save_audit_id = not args.no_save_audit_id
+        # folder_id already on args (default FOLDER_ID / DEFAULT_FOLDER_ID)
         cmd_create_audit_sheet(args)
         return
 
@@ -587,27 +625,33 @@ def main() -> None:
         sheets_svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     if args.root_only:
-        file_ids = [args.folder_id]
+        rn = _drive_folder_display_title(service, args.folder_id, "")
+        tree_entries = [(args.folder_id, rn, rn)]
     else:
-        file_ids = list(iter_folder_tree_file_ids(service, args.folder_id))
+        tree_entries = list(iter_folder_tree_with_names(service, args.folder_id))
 
     total_updated = 0
     total_skipped = 0
     total_perms = 0
     log_rows: list[list[object]] | None = [] if use_sheet else None
 
-    print(f"Processing {len(file_ids)} item(s); roles={sorted(ROLES_TO_EXPIRE)}; expires {expire_str}", flush=True)
+    print(
+        f"Processing {len(tree_entries)} item(s); roles={sorted(ROLES_TO_EXPIRE)}; expires {expire_str}",
+        flush=True,
+    )
     if use_sheet:
         print(f"Sheet log: {args.sheet_tab!r} in spreadsheet {args.spreadsheet_id}", flush=True)
 
-    for i, fid in enumerate(file_ids, start=1):
-        if len(file_ids) > 1 and i % 50 == 1:
-            print(f"… item {i}/{len(file_ids)}", flush=True)
+    for i, (fid, file_name, root_folder_name) in enumerate(tree_entries, start=1):
+        if len(tree_entries) > 1 and i % 50 == 1:
+            print(f"… item {i}/{len(tree_entries)}", flush=True)
         u, s, n = process_file_permissions(
             service,
             fid,
             expire_str,
             root_folder_id=args.folder_id,
+            root_folder_name=root_folder_name,
+            file_name=file_name,
             run_utc=run_utc,
             include_link=args.include_link,
             dry_run=args.dry_run,
@@ -639,7 +683,7 @@ def main() -> None:
             )
 
     print(
-        f"Done. Items: {len(file_ids)}; permission rows seen: {total_perms}; "
+        f"Done. Items: {len(tree_entries)}; permission rows seen: {total_perms}; "
         f"updates: {total_updated}; skipped role/type: {total_skipped}."
     )
 

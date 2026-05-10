@@ -87,9 +87,11 @@ python set_viewer_expiry.py
 
 Or: `python set_viewer_expiry.py --spreadsheet-id YOUR_ID --sheet-tab Audit`
 
-On first use, the script writes a header row if cell `A1` is empty. Columns include: run time (UTC), root folder id, file id, permission id, grantee, type, role, previous expiration, **new expiration**, status, and error text for failures.
+On first use, the script writes a header row if cell `A1` is empty. Log columns include: run time (UTC), root folder id, **root folder name**, file id, **file name**, permission id, grantee, type, role, previous expiration, **new expiration**, status, and error detail.
 
-To refresh human-readable headers and header styling on an **existing** sheet (e.g. after an older run used snake_case titles), run: `python set_viewer_expiry.py --format-sheet` (uses `SPREADSHEET_ID`, saved id, or `--spreadsheet-id`; optional `--sheet-tab`).
+`--create-audit-sheet` sets the **spreadsheet document title** to `AUDIT_SHEET_TITLE — <root folder name>` (root folder comes from `FOLDER_ID` / `--folder-id`).
+
+After upgrading column layout, run `python set_viewer_expiry.py --format-sheet` to rewrite row 1 and column widths (uses `SPREADSHEET_ID`, saved id, or `--spreadsheet-id`; optional `--sheet-tab`).
 
 **Note:** This log records **expiry changes the script made**, not who opened or viewed files in Drive (that requires Workspace admin reports or other tooling).
 
