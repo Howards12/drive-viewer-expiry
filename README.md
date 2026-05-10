@@ -12,7 +12,7 @@ This tool sets **`expirationTime`** on **reader** (view) and **writer** (edit) p
 
 ## Setup
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Drive API** for your project.
+1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Drive API** for your project. If you use Sheet logging, enable **Google Sheets API**. For **access activity** (`--sync-access-activity` / `--also-log-access`), enable **Google Drive Activity API** (API id `driveactivity.googleapis.com`; search “Drive Activity API” in **APIs & Services** → **Library**).
 2. **Credentials** → **OAuth client ID** → **Desktop app** → download JSON as `credentials/client_secret.json` (or set `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`).
 3. Install dependencies:
 
@@ -122,6 +122,36 @@ python set_viewer_expiry.py --also-log-access
 Uses `--activity-hours` (default 24) and `--activity-tab` for the second append. Requires a spreadsheet id (not compatible with `--dry-run`).
 
 **Note:** **Expiration timestamps** you set with this tool appear on the **expiry** tab. **Drive Activity** events (open/edit/move/share, etc.) appear on the **access** tab. They are not merged automatically; combine in Sheets manually if you need one view.
+
+## Automatic daily updates (no manual run)
+
+You can run **`scripts/run-daily-audit.sh`** on a schedule so **`--sync-access-activity`** runs without opening a terminal. The script uses **`set -euo pipefail`**, resolves the repo root, prefers **`.venv/bin/python`** when present, and forwards **`SPREADSHEET_ID`**, **`SHEET_TAB`**, **`ACTIVITY_SHEET_TAB`**, **`ACTIVITY_HOURS`**, and **`FOLDER_ID`** when they are already set in the environment.
+
+**Credentials:** `credentials/token.json` must exist on the machine that runs the job and stay valid (refresh tokens). The **first** OAuth browser consent is still **manual** on that machine; scheduled runs only work after that.
+
+**Optional fuller daily job:** To run **permission expiry updates** and append **access activity** in one step, uncomment the second command in `scripts/run-daily-audit.sh` (`--also-log-access`) and comment out or remove the `--sync-access-activity` line, or run both lines if you truly want two passes (usually one line is enough).
+
+### macOS (`launchd`)
+
+1. Create log directory: **`mkdir -p ~/Library/Logs/drive-viewer-expiry`**
+2. Copy **`launchd/com.google.driveviewerexpiry.daily.plist.example`** to **`~/Library/LaunchAgents/`** (e.g. same filename without `.example`), open the copy in an editor, and replace every **`__PROJECT_ROOT__`** with the **absolute path** to this repo (the folder that contains `set_viewer_expiry.py` and `scripts/`). Adjust **`Hour`** / **`Minute`** under **`StartCalendarInterval`** if you want a time other than **07:00**. Optionally add an **`EnvironmentVariables`** dict to the plist for `FOLDER_ID`, `SPREADSHEET_ID`, etc.
+3. Load: **`launchctl load ~/Library/LaunchAgents/com.google.driveviewerexpiry.daily.plist`** (use your actual plist filename).
+
+**When the Mac is asleep or off:** `StartCalendarInterval` does not fire at the exact minute while the system is asleep. **launchd** runs the job **after the Mac wakes** (the event is not permanently skipped). For a reliable wall-clock time, the machine must be **on and awake** at the scheduled time (or accept post-wake execution).
+
+### Linux (`cron`)
+
+Example **daily 07:00** (adjust paths and variables):
+
+```bash
+0 7 * * * FOLDER_ID=your_folder_id /path/to/drive-viewer-expiry/scripts/run-daily-audit.sh
+```
+
+Set `SPREADSHEET_ID` and other variables in the crontab line or source a small env file before the script.
+
+### GitHub Actions / cloud
+
+Running this tool on a schedule in **GitHub Actions** or another host is possible in principle (e.g. OAuth **refresh tokens** stored as secrets), but setup and token lifecycle are **out of scope** for this snippet—use the local `launchd` / `cron` flow above unless you invest in a proper server-side OAuth story.
 
 ## Behaviour notes
 
